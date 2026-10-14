@@ -289,6 +289,10 @@ class Card(tk.Canvas):
         super().__init__(master, bg=bg, highlightthickness=0, borderwidth=0)
         self.surface, self.fill, self.border = bg, fill, border
         self.radius, self.pad = radius, pad
+        # Our own record of the size, never read back with cget(): Tk 9
+        # answers in the units it was given ("10c" for a fresh canvas), not
+        # pixels. That crashed every card in the 1.0.0 release.
+        self._size = (0, 0)
         self._bg_item = self.create_image(0, 0, anchor="nw")
         self.inner = tk.Frame(self, bg=fill)
         self.create_window(pad, pad, window=self.inner, anchor="nw")
@@ -297,8 +301,9 @@ class Card(tk.Canvas):
     def _fit(self, _e=None) -> None:
         w = self.inner.winfo_reqwidth() + 2 * self.pad
         h = self.inner.winfo_reqheight() + 2 * self.pad
-        if (w, h) == (int(self.cget("width")), int(self.cget("height"))):
+        if (w, h) == self._size:
             return
+        self._size = (w, h)
         self.configure(width=w, height=h)
         self.itemconfigure(self._bg_item, image=rounded(w, h, self.radius, self.fill,
                                                         self.surface, border=self.border))

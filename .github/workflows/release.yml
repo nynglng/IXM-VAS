@@ -22,9 +22,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The exact Python the app is tested on, never "latest": it decides the
+      # bundled Tcl/Tk. 3.14.8 switched to Tk 9, which answers size queries
+      # differently, and 1.0.0 -- tested on 3.14.0's Tk 8.6 -- shipped with
+      # broken cards. Change packaging/python-version deliberately, after
+      # testing a local build on that version.
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.14"
+          python-version-file: packaging/python-version
 
       - name: Read VERSION
         id: version

@@ -270,6 +270,7 @@ class App:
                                   look=ui.PRIMARY, font=f.button, bg=ui.SURFACE,
                                   padx=px(20), pady=px(12), radius=px(8), min_width=content_w)
         self.init_btn.pack(anchor="w", pady=(px(24), 0))
+        self.bar_width = content_w           # kept here, not read back (see ui.Card)
         self.bar = tk.Canvas(c, width=content_w, height=px(4), bg=ui.TRACK,
                              highlightthickness=0, borderwidth=0)
         self.bar_fill = self.bar.create_rectangle(0, 0, 0, px(4), fill=ui.ACCENT, width=0)
@@ -530,7 +531,7 @@ class App:
             self._start("run")
 
     def _set_bar(self, fraction: float) -> None:
-        width = int(int(self.bar.cget("width")) * max(0.0, min(1.0, fraction)))
+        width = int(self.bar_width * max(0.0, min(1.0, fraction)))
         self.bar.coords(self.bar_fill, 0, 0, width, self.px(4))
 
     def _open_report(self) -> None:

@@ -25,6 +25,14 @@ if (-not (Test-Path $vpy)) {
     & $python -m venv $venv
     if ($LASTEXITCODE -ne 0) { throw 'Creating the build venv failed.' }
 }
+# The same Python as the Release workflow, or the build is not the one that
+# ships: the Python version decides the bundled Tcl/Tk (see release.yml).
+$pinned = (Get-Content packaging\python-version -Raw).Trim()
+$actual = (& $vpy -c 'import platform; print(platform.python_version())').Trim()
+if ($actual -ne $pinned) {
+    throw "Build Python is $actual but packaging\python-version pins $pinned. Point `$env:PYTHON at a $pinned python.exe and delete build\venv."
+}
+
 & $vpy -m pip install --disable-pip-version-check -q -r requirements.txt -r packaging\requirements-build.txt
 if ($LASTEXITCODE -ne 0) { throw 'Installing build requirements failed.' }
 
