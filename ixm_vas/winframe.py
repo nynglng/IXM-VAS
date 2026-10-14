@@ -45,7 +45,6 @@ if IS_WINDOWS:
                                                           ctypes.c_void_p, wintypes.DWORD]
     kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
     kernel32.CreateMutexW.restype = wintypes.HANDLE
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 
     class MONITORINFO(ctypes.Structure):
         _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
@@ -167,7 +166,8 @@ def work_area(root) -> Optional[Tuple[int, int, int, int]]:
 
 class SingleInstance:
     """A named mutex: one window per install. A second launch brings the first
-    one forward instead of fighting it over the Chrome profile."""
+    one forward instead of fighting it over the Chrome profile. Held for the
+    life of the process."""
 
     def __init__(self, name: str) -> None:
         self.handle = None
@@ -176,11 +176,6 @@ class SingleInstance:
             return
         self.handle = kernel32.CreateMutexW(None, False, name)
         self.already_running = ctypes.get_last_error() == ERROR_ALREADY_EXISTS
-
-    def release(self) -> None:
-        if self.handle:
-            kernel32.CloseHandle(self.handle)
-            self.handle = None
 
 
 def focus_existing(title: str) -> None:

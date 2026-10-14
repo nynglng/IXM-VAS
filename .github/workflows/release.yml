@@ -1,0 +1,72 @@
+# Builds IXM-VAS-Setup.exe and publishes it as release v<VERSION> whenever a
+# push to main changes VERSION. Installed copies check the latest release
+# every minute, so this is what makes VAs update.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [VERSION]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Read VERSION
+        id: version
+        shell: pwsh
+        run: |
+          $v = (Get-Content VERSION -Raw).Trim()
+          if ($v -notmatch '^\d+(\.\d+)*$') { throw "VERSION must look like 1.2.3, not '$v'" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      # Re-running for a version that is already out would fail at the end;
+      # bump VERSION to release again.
+      - name: Check whether v${{ steps.version.outputs.version }} is already released
+        id: existing
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "v${{ steps.version.outputs.version }}" --repo "${{ github.repository }}" *> $null
+          "released=$([int]($LASTEXITCODE -eq 0))" >> $env:GITHUB_OUTPUT
+          exit 0
+
+      - name: Install Inno Setup
+        if: steps.existing.outputs.released == '0'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Build
+        if: steps.existing.outputs.released == '0'
+        shell: pwsh
+        run: ./packaging/build.ps1
+
+      - name: Publish release
+        if: steps.existing.outputs.released == '0'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          gh release create "v$v" dist/IXM-VAS-Setup.exe dist/IXM-VAS-Setup.exe.sha256 `
+            --repo "${{ github.repository }}" --target "${{ github.sha }}" `
+            --title "IXM-VAS $v" `
+            --notes "Download **IXM-VAS-Setup.exe** below and run it. Copies that are already installed update themselves."

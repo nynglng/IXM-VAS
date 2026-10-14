@@ -1,33 +1,38 @@
-"""Where everything lives.
+"""Where everything lives: installed (built with PyInstaller) or a checkout.
 
-ROOT is the folder holding VERSION. Setup installs the app to
-%LOCALAPPDATA%\\IXM-VAS; while developing it is the git checkout itself.
+INSTALLED: the program is in %LOCALAPPDATA%\\Programs\\IXM-VAS and every update
+replaces it wholesale. The VA's own data -- their Chrome profile, reports --
+is in %LOCALAPPDATA%\\IXM-VAS, which no install, update or uninstall touches,
+so an update never signs anyone out.
 
-Everything that belongs to the VA -- their Chrome profile, their reports --
-sits next to the code but is gitignored, and the updater refuses to write into
-it, so an update can never sign anyone out or wipe a report.
+CHECKOUT: everything is the repo folder; the VA data in it is gitignored.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
+FROZEN = bool(getattr(sys, "frozen", False))
 ROOT = Path(__file__).resolve().parent.parent
 
-VERSION_FILE = ROOT / "VERSION"
-REQUIREMENTS_FILE = ROOT / "requirements.txt"
-LAUNCHER = ROOT / "IXM-VAS.pyw"
-ICON_ICO = ROOT / "assets" / "ixm-vas.ico"
+if FROZEN:
+    BUNDLE = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    APP_DIR = Path(sys.executable).resolve().parent
+    DATA = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "IXM-VAS"
+else:
+    BUNDLE = APP_DIR = DATA = ROOT
 
-# The VA's own, never in the repo.
-CHROME_PROFILE = ROOT / "chrome-profile"
-REPORTS = ROOT / "reports"
-UPDATE_DIR = ROOT / ".update"
-CRASH_LOG = REPORTS / "crash.log"
+VERSION_FILE = BUNDLE / "VERSION"
+ICON_ICO = BUNDLE / "assets" / "ixm-vas.ico"
+WORKER_EXE = APP_DIR / "ixm-vas-worker.exe"
 
-# Top-level names an update must never create, overwrite or delete.
-PROTECTED = {"chrome-profile", "reports", ".update", ".venv", ".git"}
+# The VA's own.
+CHROME_PROFILE = DATA / "chrome-profile"
+REPORTS = DATA / "reports"
+DOWNLOADS = DATA / "updates"
+CRASH_LOG = DATA / "crash.log"
 
 
 def read_version() -> str:
@@ -37,14 +42,8 @@ def read_version() -> str:
         return "0.0.0"
 
 
-def is_git_checkout() -> bool:
-    """A developer's clone. Self-update would overwrite uncommitted work, so
-    the updater refuses here and says to git pull instead."""
-    return (ROOT / ".git").exists()
-
-
 def chrome_installed() -> bool:
-    """Google Chrome, as opposed to Playwright's bundled Chromium."""
+    """Google Chrome, which every task drives (Playwright's channel="chrome")."""
     candidates = [
         Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")),
         Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")),

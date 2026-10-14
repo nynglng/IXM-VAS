@@ -1,12 +1,17 @@
 neoreadme.txt
 Screenshot 2026-10-14 222040.png
 
-# Each VA's own data. Lives next to the app on their machine, never in the repo,
-# and an update never touches it (see ixm_vas/paths.py PROTECTED).
+# A VA's own data when running from source. The installed app keeps it in
+# %LOCALAPPDATA%\IXM-VAS instead (see ixm_vas/paths.py).
 chrome-profile/
 reports/
-.venv/
-.update/
+updates/
+crash.log
 
+# packaging/build.ps1 output
+build/
+dist/
+
+.venv/
 __pycache__/
 *.pyc

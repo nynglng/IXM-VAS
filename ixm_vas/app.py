@@ -18,9 +18,11 @@ ONE TASK AT A TIME
   start another is disabled until it ends.
 
 UPDATES
-  Every minute the window asks GitHub for the current VERSION (updater.py).
-  If it is newer than this copy, the window locks behind UPDATE NOW. A store
-  run in progress is allowed to finish first; a check or a login is stopped.
+  Every minute the window asks GitHub for the latest release (updater.py).
+  If it is newer than this copy, the window locks behind UPDATE NOW, which
+  downloads the new setup, starts it and closes; the setup reopens the app.
+  A store run in progress is allowed to finish first; a check or a login is
+  stopped.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ import threading
 import tkinter as tk
 import traceback
 from datetime import datetime
+from pathlib import Path
 from tkinter import messagebox
 from typing import Optional
 
@@ -41,7 +44,10 @@ from . import paths, protocol, ui, updater, winframe
 
 TITLE = "IXM-VAS"
 APP_ID = "IXM.IXM-VAS"
-SHOPIFY_TASK = "ixm_vas.tasks.shopify_open_all_stores"
+
+# The installed app's single-instance mutex. packaging/installer.iss waits on
+# this exact name before replacing the program -- keep the two in step.
+INSTALLED_MUTEX = r"Local\IXM-VAS-app"
 
 UPDATE_CHECK_MS = 60_000
 SESSION_RECHECK_MS = 15 * 60_000     # catch a session that expired while idle
@@ -74,15 +80,26 @@ SESSION_HINT = {
 }
 
 
+def worker_command(task: str, mode: str) -> list:
+    if paths.FROZEN:
+        return [str(paths.WORKER_EXE), task, mode]
+    # From a checkout: python.exe beside the running interpreter, which is
+    # pythonw.exe when started by double-click -- the task needs a stdout.
+    exe = Path(sys.executable)
+    python = exe.with_name("python.exe") if exe.with_name("python.exe").exists() else exe
+    return [str(python), "-u", "-m", "ixm_vas.worker", task, mode]
+
+
 class Worker:
     """One task process. Its stdout lines arrive on the window's queue."""
 
     def __init__(self, mode: str, events: "queue.Queue") -> None:
         self.mode = mode
         self.events = events
+        paths.DATA.mkdir(parents=True, exist_ok=True)
         self.proc = subprocess.Popen(
-            [updater.console_python(), "-u", "-m", SHOPIFY_TASK, mode],
-            cwd=str(paths.ROOT),
+            worker_command("shopify", mode),
+            cwd=str(paths.DATA if paths.FROZEN else paths.ROOT),
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
             env=dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1"),
@@ -124,7 +141,6 @@ class App:
         self.last_report: Optional[str] = None
         self.progress_total = 0
 
-        self.checker = updater.Checker()
         self.checking_update = False
         self.update_info: Optional[updater.CheckResult] = None
         self.update_note = ""
@@ -350,7 +366,7 @@ class App:
             text=f"Signed in as {self.account}" if self.session == "logged_in" and self.account else "")
 
         local = paths.read_version()
-        note = "  ·  dev checkout" if paths.is_git_checkout() else ""
+        note = "" if paths.FROZEN else "  ·  running from source"
         self.version_lbl.configure(text=f"v{local}{note}{self.update_note}")
 
         self._refresh_overlay()
@@ -553,7 +569,7 @@ class App:
 
     def _update_check_bg(self) -> None:
         try:
-            self.events.put(("update", None, self.checker.check()))
+            self.events.put(("update", None, updater.check()))
         except Exception as e:
             self.events.put(("update_error", None, f"{type(e).__name__}: {e}"))
 
@@ -574,31 +590,40 @@ class App:
     def _on_update(self) -> None:
         if self.updating or self.worker is not None or not self.blocked:
             return
-        if paths.is_git_checkout():
-            self.update_message = ("This copy is a git checkout. Update it with git pull, "
+        if not paths.FROZEN:
+            self.update_message = ("This copy runs from source. Update it with git pull, "
                                    "then restart IXM-VAS.", True)
             self._refresh()
             return
         self.updating = True
         self.update_message = ("Starting the update…", False)
         self._refresh()
-        sha = self.update_info.sha
-        threading.Thread(target=self._update_bg, args=(sha,), daemon=True).start()
+        tag = self.update_info.tag
+        threading.Thread(target=self._update_bg, args=(tag,), daemon=True).start()
 
-    def _update_bg(self, sha: str) -> None:
+    def _update_bg(self, tag: str) -> None:
         try:
-            updater.install(sha, on_step=lambda m: self.events.put(("update_step", None, m)))
-            self.events.put(("update_done", None, None))
+            setup = updater.download_installer(
+                tag, on_step=lambda m: self.events.put(("update_step", None, m)))
+            self.events.put(("update_ready", None, setup))
         except Exception as e:
             self.events.put(("update_failed", None, str(e)))
 
-    def _restart_after_update(self) -> None:
-        self.update_message = ("Updated. Restarting…", False)
+    def _hand_over_to_setup(self, setup: Path) -> None:
+        """Start the setup and close. The setup waits for this process to be
+        gone -- its mutex is the signal, released by Windows when the process
+        ends, not before -- then installs and reopens the app."""
+        self.update_message = ("Installing… IXM-VAS will reopen by itself.", False)
         self._refresh()
         self.root.update_idletasks()
-        self.instance.release()      # the new copy must be able to take it
-        updater.relaunch()
-        self.root.destroy()
+        try:
+            updater.run_installer(setup)
+        except OSError as e:
+            self.updating = False
+            self.update_message = (f"Couldn't start the update: {e}", True)
+            self._refresh()
+            return
+        self.root.after(400, self.root.destroy)
 
     # ============================================================
     # EVENT PUMP
@@ -620,9 +645,8 @@ class App:
                 elif kind == "update_step":
                     self.update_message = (data, False)
                     self._refresh()
-                elif kind == "update_done":
-                    self._restart_after_update()
-                    return
+                elif kind == "update_ready":
+                    self._hand_over_to_setup(data)
                 elif kind == "update_failed":
                     self.updating = False
                     self.update_message = (f"The update failed: {data}\nClick UPDATE NOW to "
@@ -717,8 +741,13 @@ def main() -> None:
     winframe.set_app_id(APP_ID)
 
     # One window per install: two would fight over the one Chrome profile.
-    tag = hashlib.sha1(str(paths.ROOT).lower().encode("utf-8")).hexdigest()[:12]
-    instance = winframe.SingleInstance(f"Local\\IXM-VAS-{tag}")
+    # Never released by hand: Windows frees it when the process is gone, which
+    # is exactly when the update setup may start replacing files.
+    if paths.FROZEN:
+        name = INSTALLED_MUTEX
+    else:
+        name = r"Local\IXM-VAS-src-" + hashlib.sha1(str(paths.ROOT).lower().encode()).hexdigest()[:12]
+    instance = winframe.SingleInstance(name)
     if instance.already_running:
         winframe.focus_existing(TITLE)
         return
@@ -740,5 +769,3 @@ def main() -> None:
         except Exception:
             pass
         raise
-    finally:
-        instance.release()

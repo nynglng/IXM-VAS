@@ -16,7 +16,7 @@ What changed is who drives it and how strict it is about logging in:
     app, gitignored). That matters: "opened" is granted per USER, not per
     organization, so every VA has to open the stores for their own account.
 
-Modes -- python -m ixm_vas.tasks.shopify_open_all_stores <mode>
+Modes -- ixm-vas-worker shopify <mode>  (or python -m ixm_vas.worker shopify <mode>)
   check   headless: is the profile signed in to dev.shopify.com?
   login   visible Chrome on the dashboard; waits while the VA signs in, then
           closes Chrome by itself
@@ -127,7 +127,6 @@ LOGIN_POLL_SEC = 3
 CHROME_PROFILE = paths.CHROME_PROFILE
 REPORT_DIR = paths.REPORTS
 
-PREFER_CHROME_CHANNEL = True
 BROWSER_ARGS = ["--disable-blink-features=AutomationControlled"]
 
 
@@ -393,23 +392,21 @@ def kill_headless_leftovers() -> bool:
 
 
 async def launch_persistent(p, headless: bool):
-    user_dir = CHROME_PROFILE
-    user_dir.mkdir(parents=True, exist_ok=True)
+    """The VA's profile in their installed Google Chrome.
 
-    if PREFER_CHROME_CHANNEL:
-        try:
-            return await p.chromium.launch_persistent_context(
-                user_data_dir=str(user_dir),
-                channel="chrome",
-                headless=headless,
-                args=BROWSER_ARGS,
-                no_viewport=not headless,
-            )
-        except Exception as e:
-            print(f"[Warn] Chrome launch failed; falling back to bundled Chromium. ({e})")
-
+    Chrome only -- no fallback to Playwright's bundled Chromium. The installed
+    app does not ship one (it would add ~150 MB), and a profile signed in
+    under one browser is not reliably readable by the other.
+    """
+    if not paths.chrome_installed():
+        raise RuntimeError(
+            "Google Chrome is not installed. IXM-VAS signs in to Shopify through "
+            "Chrome: install it from https://www.google.com/chrome/ and try again."
+        )
+    CHROME_PROFILE.mkdir(parents=True, exist_ok=True)
     return await p.chromium.launch_persistent_context(
-        user_data_dir=str(user_dir),
+        user_data_dir=str(CHROME_PROFILE),
+        channel="chrome",
         headless=headless,
         args=BROWSER_ARGS,
         no_viewport=not headless,
