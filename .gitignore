@@ -1,0 +1,12 @@
+neoreadme.txt
+Screenshot 2026-10-14 222040.png
+
+# Each VA's own data. Lives next to the app on their machine, never in the repo,
+# and an update never touches it (see ixm_vas/paths.py PROTECTED).
+chrome-profile/
+reports/
+.venv/
+.update/
+
+__pycache__/
+*.pyc
