@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import ctypes
 import sys
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -41,6 +41,12 @@ if IS_WINDOWS:
     user32.SetForegroundWindow.argtypes = [wintypes.HWND]
     user32.IsIconic.argtypes = [wintypes.HWND]
     user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     ctypes.windll.dwmapi.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD,
                                                           ctypes.c_void_p, wintypes.DWORD]
     kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
@@ -176,6 +182,32 @@ class SingleInstance:
             return
         self.handle = kernel32.CreateMutexW(None, False, name)
         self.already_running = ctypes.get_last_error() == ERROR_ALREADY_EXISTS
+
+
+def window_titles(pid: int) -> List[str]:
+    """Titles of the visible top-level windows process pid owns.
+
+    For Chrome that is "<active tab's title> - Google Chrome": a way to follow
+    what the login window shows without touching the browser at all.
+    """
+    if not IS_WINDOWS:
+        return []
+    titles: List[str] = []
+
+    @WNDENUMPROC
+    def visit(hwnd, _lparam):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd):
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                user32.GetWindowTextW(hwnd, buf, n + 1)
+                titles.append(buf.value)
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return titles
 
 
 def allow_foreground_handoff() -> None:

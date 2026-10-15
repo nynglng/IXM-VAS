@@ -53,14 +53,12 @@ from __future__ import annotations
 
 import asyncio
 import html
-import json
 import os
 import re
 import subprocess
 import sys
 import time
 import traceback
-import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -68,7 +66,7 @@ from typing import Dict, List, Optional, Tuple
 
 from playwright.async_api import async_playwright
 
-from ixm_vas import paths
+from ixm_vas import paths, winframe
 from ixm_vas.protocol import (
     EXIT_ERROR, EXIT_LOGGED_OUT, EXIT_LOGIN_ABORTED, EXIT_OK, EXIT_PROFILE_BUSY,
     EXIT_SOME_FAILED, emit,
@@ -126,8 +124,9 @@ COLLABORATION_TYPE = "collaboration"
 LOGIN_WAIT_SEC = 600
 LOGIN_POLL_SEC = 1.5
 
-# The dashboard proper, inside an organization: the sign-in is through.
-SIGNED_IN_URL_RE = re.compile(r'^https://dev\.shopify\.com/dashboard/\d+', re.I)
+# The login window's title once the dashboard shows ("Stores · Dev Dashboard
+# - Google Chrome"); every sign-in page is titled "Log in — Shopify".
+SIGNED_IN_TITLE_RE = re.compile(r'\bDashboard\b', re.I)
 
 CHROME_MISSING = ("Google Chrome is not installed. IXM-VAS signs in to Shopify through "
                   "Chrome: install it from https://www.google.com/chrome/ and try again.")
@@ -457,41 +456,24 @@ async def open_profile(p, headless: bool, wait_sec: float = 0):
 
 
 # ------------------------------------------------------------
-# The login window: plain Chrome, nothing driving it
+# The login window: plain Chrome, nothing attached to it
 # ------------------------------------------------------------
-# Signing in happens in Chrome started the ordinary way -- not launched by
-# Playwright -- and nothing touches Shopify while the VA is at it.
+# Shopify's sign-in rejects any Chrome with a debugging connection, silently:
+# its hCaptcha check fails and "Continue with email" -- or picking an account
+# on "Choose an account" -- lands right back on the same page. Measured
+# 2026-10-16 with the same fresh profile and dummy email, driven through
+# Windows UI Automation: with --remote-debugging-port the email step bounced
+# back every time; without it, it moved on. Playwright drives Chrome over
+# exactly such a connection, which is why 1.0.0-1.0.2 all looped.
 #
-# The first version drove the login window with Playwright and polled the
-# dashboard every 3s over the same cookies. With no session, every one of
-# those polls starts a fresh Shopify login, replacing the one the VA is
-# halfway through: clicking their account on "Choose an account" landed them
-# right back on it, every time (reported 2026-10-16). It also carried the
-# "Chrome is being controlled by automated test software" bar, which sign-in
-# pages are entitled to distrust.
-#
-# So the window is only watched: Chrome's DevTools list on 127.0.0.1 gives the
-# address of each open tab, a read that the page never sees. Reaching
-# dev.shopify.com/dashboard/<org> means the VA is through. Chrome is then
-# closed the way its X button closes it, which is what writes the new session
-# to disk, and a headless check confirms the login actually took.
-
-def devtools_port() -> Optional[int]:
-    """The port Chrome picked for --remote-debugging-port=0; it writes it into
-    the profile once it is listening."""
-    try:
-        return int((CHROME_PROFILE / "DevToolsActivePort").read_text().split()[0])
-    except (OSError, IndexError, ValueError):
-        return None
-
-
-def open_tab_urls(port: int) -> List[str]:
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=2) as resp:
-            return [t.get("url", "") for t in json.load(resp) if t.get("type") == "page"]
-    except (OSError, ValueError):
-        return []
-
+# So the login window is Chrome started the ordinary way: no Playwright, no
+# debugging port, nothing touching Shopify while the VA signs in. It is only
+# watched from outside, through its window title ("<tab title> - Google
+# Chrome"), which Windows reports to anyone and the page cannot notice. Once
+# the title shows the dashboard, Chrome is closed the way its X button closes
+# it -- which is what writes the new session to disk -- and a headless check
+# confirms the login took. Only then does Playwright touch the profile again,
+# for plain HTTP requests the dashboard has always accepted.
 
 def close_chrome(proc: subprocess.Popen) -> None:
     """Close Chrome like its X button does, so it saves the new session.
@@ -853,12 +835,9 @@ async def do_login() -> int:
         return EXIT_PROFILE_BUSY
 
     CHROME_PROFILE.mkdir(parents=True, exist_ok=True)
-    try:
-        (CHROME_PROFILE / "DevToolsActivePort").unlink()     # a previous run's port
-    except OSError:
-        pass
+    # No --remote-debugging-port, no Playwright: see "The login window" above.
     proc = subprocess.Popen(
-        [str(chrome), f"--user-data-dir={CHROME_PROFILE}", "--remote-debugging-port=0",
+        [str(chrome), f"--user-data-dir={CHROME_PROFILE}",
          "--no-first-run", "--no-default-browser-check", "--new-window", DASHBOARD_ROOT],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
@@ -868,12 +847,10 @@ async def do_login() -> int:
 
     reached_dashboard = False
     try:
-        port = None
         deadline = time.monotonic() + LOGIN_WAIT_SEC
         while time.monotonic() < deadline and proc.poll() is None:
             await asyncio.sleep(LOGIN_POLL_SEC)
-            port = port or devtools_port()
-            if port and any(SIGNED_IN_URL_RE.match(u) for u in open_tab_urls(port)):
+            if any(SIGNED_IN_TITLE_RE.search(t) for t in winframe.window_titles(proc.pid)):
                 reached_dashboard = True
                 break
         timed_out = not reached_dashboard and proc.poll() is None
