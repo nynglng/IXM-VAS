@@ -71,7 +71,7 @@ SESSION_HINT = {
     "checking":    "Checking your Shopify login…",
     "logged_out":  "Log in first: click LOGGED OUT at the top right.",
     "logging_in":  "Chrome is open on the Shopify login. Sign in there; it closes by "
-                   "itself once you're in.",
+                   "itself once you're in. If it doesn't, close it yourself.",
     "logged_in":   "Ready.",
     "unreachable": "Couldn't reach Shopify. Check your internet, then click "
                    "UNREACHABLE at the top right to try again.",
@@ -421,6 +421,7 @@ class App:
             self.session = "checking"
         elif mode == "login":
             self.session = "logging_in"
+            winframe.allow_foreground_handoff()
         elif mode == "run":
             self.progress_total = 0
             self.init_btn.update_look(text="INITIALIZING…")
@@ -447,6 +448,9 @@ class App:
                 if msg.get("reason") == "timeout":
                     self._say("Stopped waiting for the login after 10 minutes. Click "
                               "LOGGED OUT to try again.")
+                elif msg.get("reason") == "not_saved":
+                    self._say("Chrome reached Shopify, but the login didn't save. Click "
+                              "LOGGED OUT to try again.", error=True)
         elif kind == "login_window_open":
             self.message = None
         elif kind == "profile_busy":

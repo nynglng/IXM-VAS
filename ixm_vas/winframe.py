@@ -178,6 +178,20 @@ class SingleInstance:
         self.already_running = ctypes.get_last_error() == ERROR_ALREADY_EXISTS
 
 
+def allow_foreground_handoff() -> None:
+    """Let the next window another process opens come to the front.
+
+    Windows keeps background processes from stealing focus, and the login
+    Chrome is started by a hidden worker, not by this window -- without this
+    it can open behind IXM-VAS and only flash in the taskbar.
+    """
+    if IS_WINDOWS:
+        try:
+            ctypes.windll.user32.AllowSetForegroundWindow(-1)      # ASFW_ANY
+        except Exception:
+            pass
+
+
 def focus_existing(title: str) -> None:
     if not IS_WINDOWS:
         return

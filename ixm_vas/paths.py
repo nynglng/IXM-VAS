@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 FROZEN = bool(getattr(sys, "frozen", False))
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,12 +43,16 @@ def read_version() -> str:
         return "0.0.0"
 
 
-def chrome_installed() -> bool:
+def chrome_exe() -> Optional[Path]:
     """Google Chrome, which every task drives (Playwright's channel="chrome")."""
-    candidates = [
-        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")),
-        Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")),
-        Path(os.environ.get("LOCALAPPDATA", "")),
-    ]
-    return any((base / "Google" / "Chrome" / "Application" / "chrome.exe").exists()
-               for base in candidates)
+    for base in (os.environ.get("PROGRAMFILES", r"C:\Program Files"),
+                 os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+                 os.environ.get("LOCALAPPDATA", "")):
+        exe = Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe"
+        if base and exe.exists():
+            return exe
+    return None
+
+
+def chrome_installed() -> bool:
+    return chrome_exe() is not None

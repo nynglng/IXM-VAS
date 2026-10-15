@@ -18,8 +18,8 @@ What changed is who drives it and how strict it is about logging in:
 
 Modes -- ixm-vas-worker shopify <mode>  (or python -m ixm_vas.worker shopify <mode>)
   check   headless: is the profile signed in to dev.shopify.com?
-  login   visible Chrome on the dashboard; waits while the VA signs in, then
-          closes Chrome by itself
+  login   a plain Chrome window on the dashboard; waits while the VA signs in,
+          closes Chrome by itself, then checks the login took
   run     headless: open every collaborator store, write the report
 
 HOW OPENING WORKS
@@ -53,12 +53,14 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import os
 import re
 import subprocess
 import sys
 import time
 import traceback
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -122,7 +124,17 @@ COLLABORATION_TYPE = "collaboration"
 # Signing in: how long the login window waits, and how often it looks.
 # Generous, because a VA may need a 2FA code from someone else.
 LOGIN_WAIT_SEC = 600
-LOGIN_POLL_SEC = 3
+LOGIN_POLL_SEC = 1.5
+
+# The dashboard proper, inside an organization: the sign-in is through.
+SIGNED_IN_URL_RE = re.compile(r'^https://dev\.shopify\.com/dashboard/\d+', re.I)
+
+CHROME_MISSING = ("Google Chrome is not installed. IXM-VAS signs in to Shopify through "
+                  "Chrome: install it from https://www.google.com/chrome/ and try again.")
+PROFILE_BUSY = ("Chrome is already open on your IXM-VAS profile. Close that Chrome "
+                "window, then try again.")
+
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 CHROME_PROFILE = paths.CHROME_PROFILE
 REPORT_DIR = paths.REPORTS
@@ -399,10 +411,7 @@ async def launch_persistent(p, headless: bool):
     under one browser is not reliably readable by the other.
     """
     if not paths.chrome_installed():
-        raise RuntimeError(
-            "Google Chrome is not installed. IXM-VAS signs in to Shopify through "
-            "Chrome: install it from https://www.google.com/chrome/ and try again."
-        )
+        raise RuntimeError(CHROME_MISSING)
     CHROME_PROFILE.mkdir(parents=True, exist_ok=True)
     return await p.chromium.launch_persistent_context(
         user_data_dir=str(CHROME_PROFILE),
@@ -413,27 +422,89 @@ async def launch_persistent(p, headless: bool):
     )
 
 
-async def open_profile(p, headless: bool):
-    """Launch Chrome on the VA's profile, or None if the profile is taken."""
+async def claim_profile(wait_sec: float = 0) -> bool:
+    """True once no Chrome holds the profile. Otherwise tell the window, False.
+
+    wait_sec covers a Chrome that is still shutting down -- right after the
+    login window closes, its lock outlives the window by a moment.
+    """
+    deadline = time.monotonic() + wait_sec
+    while profile_in_use() and time.monotonic() < deadline:
+        await asyncio.sleep(0.5)
+    if profile_in_use() and kill_headless_leftovers():
+        await asyncio.sleep(2)
     if profile_in_use():
-        if kill_headless_leftovers():
-            await asyncio.sleep(2)
-        if profile_in_use():
-            emit("profile_busy")
-            print("Chrome is already open on your IXM-VAS profile. Close that Chrome "
-                  "window, then try again.")
-            return None
+        emit("profile_busy")
+        print(PROFILE_BUSY)
+        return False
+    return True
+
+
+async def open_profile(p, headless: bool, wait_sec: float = 0):
+    """Launch Chrome on the VA's profile, or None if the profile is taken."""
+    if not await claim_profile(wait_sec):
+        return None
     try:
         context = await launch_persistent(p, headless=headless)
     except Exception:
         if profile_in_use():
             emit("profile_busy")
-            print("Chrome is already open on your IXM-VAS profile. Close that Chrome "
-                  "window, then try again.")
+            print(PROFILE_BUSY)
             return None
         raise
     context.set_default_timeout(REQUEST_TIMEOUT_MS)
     return context
+
+
+# ------------------------------------------------------------
+# The login window: plain Chrome, nothing driving it
+# ------------------------------------------------------------
+# Signing in happens in Chrome started the ordinary way -- not launched by
+# Playwright -- and nothing touches Shopify while the VA is at it.
+#
+# The first version drove the login window with Playwright and polled the
+# dashboard every 3s over the same cookies. With no session, every one of
+# those polls starts a fresh Shopify login, replacing the one the VA is
+# halfway through: clicking their account on "Choose an account" landed them
+# right back on it, every time (reported 2026-10-16). It also carried the
+# "Chrome is being controlled by automated test software" bar, which sign-in
+# pages are entitled to distrust.
+#
+# So the window is only watched: Chrome's DevTools list on 127.0.0.1 gives the
+# address of each open tab, a read that the page never sees. Reaching
+# dev.shopify.com/dashboard/<org> means the VA is through. Chrome is then
+# closed the way its X button closes it, which is what writes the new session
+# to disk, and a headless check confirms the login actually took.
+
+def devtools_port() -> Optional[int]:
+    """The port Chrome picked for --remote-debugging-port=0; it writes it into
+    the profile once it is listening."""
+    try:
+        return int((CHROME_PROFILE / "DevToolsActivePort").read_text().split()[0])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def open_tab_urls(port: int) -> List[str]:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=2) as resp:
+            return [t.get("url", "") for t in json.load(resp) if t.get("type") == "page"]
+    except (OSError, ValueError):
+        return []
+
+
+def close_chrome(proc: subprocess.Popen) -> None:
+    """Close Chrome like its X button does, so it saves the new session.
+    Forced only if it has not gone after 20 seconds."""
+    if proc.poll() is not None:
+        return
+    subprocess.run(["taskkill", "/PID", str(proc.pid)], capture_output=True,
+                   creationflags=NO_WINDOW)
+    try:
+        proc.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True,
+                       creationflags=NO_WINDOW)
 
 
 async def close_quietly(context) -> None:
@@ -768,65 +839,78 @@ async def do_check() -> int:
 
 
 async def do_login() -> int:
-    """Visible Chrome on the dashboard; wait for the VA to sign in, then close it.
+    """A plain Chrome window on the dashboard; close it once the VA is through.
 
-    Polls the dashboard over the same cookies every few seconds. The moment it
-    answers with an organization the session is real, and Chrome is closed
-    for the VA -- they never have to close it themselves. Closing the window
-    first means they gave up, and the indicator stays red.
+    See "The login window" above for why nothing drives or polls Shopify
+    while the VA signs in. Closing the window themselves is fine either way:
+    the check afterwards decides, so a VA who signed in and closed Chrome
+    before it closed itself still turns green.
     """
+    chrome = paths.chrome_exe()
+    if chrome is None:
+        raise RuntimeError(CHROME_MISSING)
+    if not await claim_profile():
+        return EXIT_PROFILE_BUSY
+
+    CHROME_PROFILE.mkdir(parents=True, exist_ok=True)
+    try:
+        (CHROME_PROFILE / "DevToolsActivePort").unlink()     # a previous run's port
+    except OSError:
+        pass
+    proc = subprocess.Popen(
+        [str(chrome), f"--user-data-dir={CHROME_PROFILE}", "--remote-debugging-port=0",
+         "--no-first-run", "--no-default-browser-check", "--new-window", DASHBOARD_ROOT],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    print("Chrome is open on the Shopify login page. Sign in there; it closes by "
+          "itself once you are through.")
+    emit("login_window_open")
+
+    reached_dashboard = False
+    try:
+        port = None
+        deadline = time.monotonic() + LOGIN_WAIT_SEC
+        while time.monotonic() < deadline and proc.poll() is None:
+            await asyncio.sleep(LOGIN_POLL_SEC)
+            port = port or devtools_port()
+            if port and any(SIGNED_IN_URL_RE.match(u) for u in open_tab_urls(port)):
+                reached_dashboard = True
+                break
+        timed_out = not reached_dashboard and proc.poll() is None
+        if reached_dashboard:
+            print("Reached the Shopify dashboard -- closing Chrome.")
+            await asyncio.sleep(1.5)        # let the dashboard's own cookies land
+    finally:
+        close_chrome(proc)
+
+    # The tab's address was the hint; the profile's cookies are the verdict.
     async with async_playwright() as p:
-        context = await open_profile(p, headless=False)
+        context = await open_profile(p, headless=True, wait_sec=10)
         if context is None:
             return EXIT_PROFILE_BUSY
-
-        closed = asyncio.Event()
-        context.on("close", lambda *_: closed.set())
         try:
-            page = context.pages[0] if context.pages else await context.new_page()
-            # The last tab going away means the window was closed, even when
-            # Chrome itself has not quite exited yet.
-            page.on("close", lambda *_: closed.set() if not context.pages else None)
+            headers = await browser_headers(context)
             try:
-                await page.goto(DASHBOARD_ROOT, wait_until="domcontentloaded")
-                await page.bring_to_front()
-            except Exception:
-                pass
-            headers = await browser_headers(context, page)
-
-            print("Chrome is open on the Shopify login page. Sign in there; it closes "
-                  "by itself once you are through.")
-            emit("login_window_open")
-
-            deadline = time.monotonic() + LOGIN_WAIT_SEC
-            while time.monotonic() < deadline:
-                try:
-                    await asyncio.wait_for(closed.wait(), LOGIN_POLL_SEC)
-                except asyncio.TimeoutError:
-                    pass
-                if closed.is_set():
+                org_id, account = await discover_session(context, headers)
+            except NotLoggedIn:
+                if timed_out:
+                    print(f"Gave up waiting after {LOGIN_WAIT_SEC // 60} minutes. Click "
+                          "the indicator to try again.")
+                    emit("session", state="logged_out", reason="timeout")
+                elif reached_dashboard:
+                    print("Chrome reached the dashboard, but the login was not saved to "
+                          "the profile. Click the indicator to try again.")
+                    emit("session", state="logged_out", reason="not_saved")
+                else:
                     print("The login window was closed before signing in.")
                     emit("session", state="logged_out", reason="closed")
-                    return EXIT_LOGIN_ABORTED
-                try:
-                    org_id, account = await discover_session(context, headers)
-                except NotLoggedIn:
-                    continue
-                except Exception:
-                    # Mid-login pages and a closing browser both land here;
-                    # neither is a verdict, so just look again.
-                    continue
-
-                print(f"Signed in as {account or '(account not detected)'} -- closing Chrome.")
-                emit("session", state="logged_in", account=account, org=org_id)
-                return EXIT_OK
-
-            print(f"Gave up waiting after {LOGIN_WAIT_SEC // 60} minutes. Click the "
-                  "indicator to try again.")
-            emit("session", state="logged_out", reason="timeout")
-            return EXIT_LOGIN_ABORTED
+                return EXIT_LOGIN_ABORTED
         finally:
             await close_quietly(context)
+
+    print(f"Signed in as {account or '(account not detected)'}, partner org {org_id}.")
+    emit("session", state="logged_in", account=account, org=org_id)
+    return EXIT_OK
 
 
 async def do_run() -> int:
